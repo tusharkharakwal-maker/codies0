@@ -30,6 +30,13 @@ export function MotionProvider({ children }: { children: ReactNode }) {
   const busy = useRef(false);
   const transition = useRef<gsap.core.Timeline | null>(null);
 
+  const resetTransition = useCallback(() => {
+    transition.current?.kill();
+    transition.current = null;
+    busy.current = false;
+    gsap.set(wipe.current, { visibility: "hidden", y: 0, yPercent: -100 });
+  }, []);
+
   const navigate = useCallback(
     (href: string) => {
       if (busy.current) return;
@@ -54,6 +61,13 @@ export function MotionProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
+    // History gestures can interrupt either half of a transition. Cancel the
+    // pending push as well as the animation so it cannot reopen the project.
+    const restorePage = (event: PageTransitionEvent) => {
+      if (event.persisted) resetTransition();
+    };
+    window.addEventListener("popstate", resetTransition);
+    window.addEventListener("pageshow", restorePage);
     const reduced = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
     ).matches;
@@ -84,15 +98,18 @@ export function MotionProvider({ children }: { children: ReactNode }) {
       gsap.ticker.remove(tick);
       update.kill();
       transition.current?.kill();
+      window.removeEventListener("popstate", resetTransition);
+      window.removeEventListener("pageshow", restorePage);
     };
-  }, []);
+  }, [resetTransition]);
 
   useLayoutEffect(() => {
+    if (!busy.current) resetTransition();
     const reduced = window.matchMedia(
       "(prefers-reduced-motion: reduce)",
     ).matches;
     const compact = window.matchMedia("(max-width: 767px)").matches;
-    const context = gsap.context(() => {
+    const context = gsap.context((pageContext) => {
       const heroLines = gsap.utils.toArray<HTMLElement>("[data-hero-line]");
       const reveal = () => {
         if (!reduced) {
@@ -159,21 +176,30 @@ export function MotionProvider({ children }: { children: ReactNode }) {
       } else {
         gsap.set(preloader.current, { display: "none" });
         if (busy.current) {
-          gsap.fromTo(
-            wipe.current,
-            { y: 0, yPercent: 0, visibility: "visible" },
-            {
-              yPercent: -100,
-              delay: 0.18,
-              duration: 0.42,
-              ease: "power3.inOut",
-              onComplete: () => {
-                gsap.set(wipe.current, { visibility: "hidden" });
-                busy.current = false;
-                reveal();
-              },
-            },
-          );
+          // The overlay persists across routes. Page cleanup must never revert
+          // it to the covered state captured at the start of this animation.
+          pageContext.ignore(() => {
+            transition.current?.kill();
+            transition.current = gsap
+              .timeline({
+                onComplete: () => {
+                  gsap.set(wipe.current, { visibility: "hidden" });
+                  transition.current = null;
+                  busy.current = false;
+                  reveal();
+                },
+              })
+              .fromTo(
+                wipe.current,
+                { y: 0, yPercent: 0, visibility: "visible" },
+                {
+                  yPercent: -100,
+                  delay: 0.18,
+                  duration: 0.42,
+                  ease: "power3.inOut",
+                },
+              );
+          });
         } else reveal();
       }
       if (!reduced) {
@@ -212,7 +238,7 @@ export function MotionProvider({ children }: { children: ReactNode }) {
       }
     });
     return () => context.revert();
-  }, [pathname]);
+  }, [pathname, resetTransition]);
 
   return (
     <TransitionContext.Provider value={navigate}>
